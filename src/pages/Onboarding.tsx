@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { Music, Radio, Disc, Headphones, Mic2, Globe, Piano, Guitar, Drumstick, Heart, Zap, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useAuth } from "@/context/AuthContext";
+import { supabase } from "@/lib/supabase";
 
 const genres = [
   { id: 'rock', name: 'Rock', icon: Guitar },
@@ -10,7 +12,7 @@ const genres = [
   { id: 'electronic', name: 'Electronic/Dance', icon: Zap },
   { id: 'hip-hop', name: 'Hip Hop', icon: Mic2 },
   { id: 'folk', name: 'Folk/Americana', icon: Music },
-  { id: 'world', name: 'World Music', icon: Globe },
+  { id: 'punk', name: 'Punk', icon: Guitar },
   { id: 'classical', name: 'Classical', icon: Piano },
   { id: 'blues', name: 'Blues', icon: Guitar },
   { id: 'indie', name: 'Indie/Alternative', icon: Disc },
@@ -25,7 +27,7 @@ const artistsByGenre: Record<string, string[]> = {
   'electronic': ['Daft Punk', 'Kraftwerk', 'Aphex Twin', 'The Chemical Brothers', 'Deadmau5', 'Calvin Harris'],
   'hip-hop': ['Kendrick Lamar', 'Outkast', 'Jay-Z', 'Nas', 'A Tribe Called Quest', 'Kanye West'],
   'folk': ['Bob Dylan', 'Joni Mitchell', 'Woody Guthrie', 'Simon & Garfunkel', 'Joan Baez', 'Nick Drake'],
-  'world': ['Fela Kuti', 'Ravi Shankar', 'Cesária Évora', 'Ali Farka Touré', 'Youssou N\'Dour', 'Buena Vista Social Club'],
+  'punk': ['The Clash', 'The Ramones', 'Sex Pistols', 'Green Day', 'Joy Division', 'Talking Heads'],
   'classical': ['Beethoven', 'Mozart', 'Bach', 'Chopin', 'Tchaikovsky', 'Vivaldi'],
   'blues': ['B.B. King', 'Muddy Waters', 'Robert Johnson', 'Howlin\' Wolf', 'Etta James', 'Buddy Guy'],
   'indie': ['Radiohead', 'Arcade Fire', 'The Strokes', 'Arctic Monkeys', 'Tame Impala', 'Bon Iver'],
@@ -59,16 +61,33 @@ const Onboarding = () => {
     }
   };
 
-  const handleContinue = () => {
-    // COMPLETELY CLEAR any previous preferences before saving new ones
+  const { user } = useAuth();
+
+  const handleContinue = async () => {
+    // Save to LocalStorage for offline/guest support
     localStorage.removeItem('userGenres');
     localStorage.removeItem('userArtists');
-
-    // Now save ONLY the newly selected preferences
     localStorage.setItem('userGenres', JSON.stringify(selectedGenres));
     localStorage.setItem('userArtists', JSON.stringify(selectedArtists));
 
-    console.log('Preferences saved (completely reset):', selectedGenres);
+    // Save to Supabase if logged in
+    if (user) {
+      try {
+        const { error } = await supabase
+          .from('user_preferences')
+          .upsert({
+            user_id: user.id,
+            genres: selectedGenres,
+            updated_at: new Date().toISOString()
+          });
+
+        if (error) throw error;
+      } catch (err) {
+        console.error('Error saving preferences to cloud:', err);
+      }
+    }
+
+    console.log('Preferences saved:', selectedGenres);
     navigate('/radio');
   };
 
@@ -89,8 +108,8 @@ const Onboarding = () => {
         {/* Header */}
         <div className="text-center mb-12">
           <div className="flex items-center justify-center gap-3 mb-4">
-            <Headphones className="w-10 h-10 text-primary" />
-            <h1 className="text-4xl font-bold text-primary">RadioScope</h1>
+            <Headphones className="w-10 h-10 text-[#331F21]" />
+            <h1 className="text-4xl font-bold text-[#331F21]">My Radio</h1>
           </div>
           <p className="text-lg text-muted-foreground">Find your perfect station</p>
           <div className="mt-6 flex items-center justify-center gap-2">
@@ -121,8 +140,8 @@ const Onboarding = () => {
                   key={genre.id}
                   onClick={() => toggleGenre(genre.id)}
                   className={`p-6 rounded-xl border-2 transition-all duration-200 flex flex-col items-center gap-3 ${isSelected
-                      ? 'bg-accent border-accent text-accent-foreground shadow-medium scale-105'
-                      : 'bg-card border-border hover:border-primary hover:shadow-soft'
+                    ? 'bg-accent border-accent text-accent-foreground shadow-medium scale-105'
+                    : 'bg-card border-border hover:border-primary hover:shadow-soft'
                     }`}
                 >
                   <Icon className="w-8 h-8" />
@@ -160,8 +179,8 @@ const Onboarding = () => {
                       key={artist}
                       onClick={() => toggleArtist(artist)}
                       className={`p-4 rounded-lg border-2 transition-all duration-200 text-left ${isSelected
-                          ? 'bg-secondary border-secondary text-secondary-foreground shadow-soft'
-                          : 'bg-card border-border hover:border-secondary'
+                        ? 'bg-secondary border-secondary text-secondary-foreground shadow-soft'
+                        : 'bg-card border-border hover:border-secondary'
                         }`}
                     >
                       <div className="flex items-center gap-3">

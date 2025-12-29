@@ -21,6 +21,20 @@
 
 <body>
   <div id="root"></div>
+  <script>
+    window.onerror = function (msg, url, lineNo, columnNo, error) {
+      const root = document.getElementById('root');
+      if (root) {
+        root.innerHTML = '<div style="background: #331F21; color: #E0CDCE; padding: 20px; font-family: sans-serif; height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center;">' +
+          '<h1 style="color: #ff5555;">⚠️ App Crash Detected</h1>' +
+          '<p style="max-width: 600px; font-weight: bold;">' + msg + '</p>' +
+          '<p style="opacity: 0.7; font-size: 12px;">' + url + ' (line ' + lineNo + ')</p>' +
+          '<button onclick="location.reload()" style="margin-top: 20px; padding: 10px 20px; background: #D3E1E6; border: none; font-weight: bold; cursor: pointer;">Reload App</button>' +
+          '</div>';
+      }
+      return false;
+    };
+  </script>
   <script type="module" src="/src/main.tsx"></script>
 </body>
 

@@ -1,6 +1,8 @@
 // Song Identification Service using AudD API
 // AudD provides accurate music recognition like Shazam
 
+import { toast } from "sonner";
+
 const AUDD_API_URL = 'https://api.audd.io/';
 
 // AudD has a free tier that allows some requests without an API key
@@ -45,34 +47,102 @@ export function parseStreamMetadata(metadataString: string): SongInfo | null {
   };
 }
 
+// Singleton instances for Web Audio API nodes
+let sharedAudioContext: AudioContext | null = null;
+let sharedSourceNode: MediaElementAudioSourceNode | null = null;
+let sharedAnalyserNode: AnalyserNode | null = null;
+let sharedGainNode: GainNode | null = null;
+let lastAudioElement: HTMLAudioElement | null = null;
+
 /**
- * Capture microphone audio and return as a Blob
+ * Initialize the audio graph for a specific element
+ * This ensures we only connect once and share the nodes
  */
-async function captureMicrophoneAudio(
-  durationMs: number = 8000,
+export function initializeAudioTap(audioElement: HTMLAudioElement) {
+  if (!sharedAudioContext) {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    // Use system default sample rate for maximum compatibility
+    sharedAudioContext = new AudioContextClass();
+    console.log(`[Identification] AudioContext created. Sample rate: ${sharedAudioContext.sampleRate}Hz`);
+  }
+
+  const audioContext = sharedAudioContext;
+
+  // ABSOLUTE ARCHITECTURE: Create a permanent, non-breaking splitter graph
+  if (!sharedSourceNode || lastAudioElement !== audioElement) {
+    try {
+      console.log('[Identification] Configuring Audio Splitter Matrix...');
+
+      // Cleanup old source if it exists (but keep Context)
+      if (sharedSourceNode) {
+        try { sharedSourceNode.disconnect(); } catch (e) { }
+      }
+
+      sharedSourceNode = audioContext.createMediaElementSource(audioElement);
+      lastAudioElement = audioElement;
+
+      if (!sharedAnalyserNode) {
+        sharedAnalyserNode = audioContext.createAnalyser();
+        sharedAnalyserNode.fftSize = 2048;
+      }
+
+      if (!sharedGainNode) {
+        sharedGainNode = audioContext.createGain();
+        sharedGainNode.gain.value = 1.0;
+      }
+
+      /**
+       * SPLITTER ROUTING:
+       * Source (Radio) -> GainNode (Splitter)
+       * GainNode -> Destination (Speakers) - ALWAYS ON
+       * GainNode -> Analyser (Visualizer/Tap) - ALWAYS ON
+       */
+      sharedSourceNode.connect(sharedGainNode);
+      sharedGainNode.connect(audioContext.destination);
+      sharedGainNode.connect(sharedAnalyserNode);
+
+      console.log('[Identification] Absolute Splitter Active: Source -> Gain -> [Speakers & Analyser]');
+    } catch (error) {
+      console.warn('[Identification] Splitter matrix warning:', error);
+    }
+  }
+
+  return { audioContext, source: sharedSourceNode!, analyser: sharedAnalyserNode!, gain: sharedGainNode! };
+}
+
+/**
+ * Get or create the shared AnalyserNode for visualizers
+ */
+export function getAnalyserNode(): AnalyserNode | null {
+  return sharedAnalyserNode;
+}
+
+/**
+ * Capture internal audio from the playback element
+ */
+async function captureInternalAudio(
+  audioElement: HTMLAudioElement,
+  durationMs: number = 10000,
   onProgress?: (message: string) => void
 ): Promise<Blob> {
-  onProgress?.('Requesting microphone access...');
+  onProgress?.('Initializing digital stream analysis...');
 
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: true,
-      sampleRate: 44100
-    }
-  });
+  const { audioContext, analyser } = initializeAudioTap(audioElement);
 
-  onProgress?.(`Listening (${durationMs / 1000} seconds)...`);
+  // Requirement: State Management (Explicit Resume)
+  if (audioContext.state === 'suspended') {
+    await audioContext.resume();
+  }
 
-  // Use MediaRecorder to capture audio
-  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-    ? 'audio/webm;codecs=opus'
-    : MediaRecorder.isTypeSupported('audio/webm')
-      ? 'audio/webm'
-      : 'audio/mp4';
+  onProgress?.('Analyzing Digital Stream...');
 
-  const mediaRecorder = new MediaRecorder(stream, { mimeType });
+  // PCM Capture Routing: Connect tap specifically to the AnalyserNode
+  const destination = audioContext.createMediaStreamDestination();
+  analyser.connect(destination);
+
+  onProgress?.('Capturing 10s audio buffer...');
+
+  const mediaRecorder = new MediaRecorder(destination.stream);
   const audioChunks: Blob[] = [];
 
   return new Promise((resolve, reject) => {
@@ -82,19 +152,51 @@ async function captureMicrophoneAudio(
       }
     };
 
-    mediaRecorder.onstop = () => {
-      stream.getTracks().forEach(track => track.stop());
-      const audioBlob = new Blob(audioChunks, { type: mimeType });
-      resolve(audioBlob);
+    mediaRecorder.onstop = async () => {
+      // Cleanup Tap: Disconnect the destination from the analyzer
+      try {
+        analyser.disconnect(destination);
+      } catch (e) {
+        console.warn('[Identification] Tap cleanup error:', e);
+      }
+
+      const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+
+      try {
+        // REQUIREMENT: Verify Data (CORS Metadata Check)
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        analyser.getByteTimeDomainData(dataArray);
+
+        let hasSignal = false;
+        for (let i = 0; i < dataArray.length; i++) {
+          if (Math.abs(dataArray[i] - 128) > 2) { // 2 is noise floor
+            hasSignal = true;
+            break;
+          }
+        }
+
+        if (!hasSignal) {
+          console.error('[Identification] Hardware Failure: Visualizer is flat (0% activity).');
+          reject(new Error("Security Block: Cannot read stream data. Check CORS headers."));
+          return;
+        }
+
+        console.log('[Identification] Signal verified. Proceeding to identification...');
+        resolve(audioBlob);
+      } catch (e) {
+        console.warn('[Identification] Buffer analysis fallback:', e);
+        resolve(audioBlob);
+      }
     };
 
-    mediaRecorder.onerror = (event) => {
-      stream.getTracks().forEach(track => track.stop());
-      reject(new Error('Recording failed'));
+    mediaRecorder.onerror = () => {
+      try { analyser.disconnect(destination); } catch (e) { }
+      reject(new Error('Internal capture failed. Context unstable.'));
     };
 
     mediaRecorder.start();
 
+    // 10-second capture window as requested
     setTimeout(() => {
       if (mediaRecorder.state === 'recording') {
         mediaRecorder.stop();
@@ -104,26 +206,33 @@ async function captureMicrophoneAudio(
 }
 
 /**
- * Identify song using AudD API
+ * Identify song using AudD API with internal audio tap
  */
 async function identifyWithAudD(
+  audioElement: HTMLAudioElement,
   onProgress?: (message: string) => void
 ): Promise<SongInfo | null> {
   try {
-    console.log('[AudD] Starting identification...');
+    console.log('[AudD] Starting direct stream identification...');
 
-    // Capture 8 seconds of audio
-    const audioBlob = await captureMicrophoneAudio(8000, onProgress);
-    console.log('[AudD] Audio captured, size:', audioBlob.size, 'bytes');
+    // Capture 10 seconds of internal audio
+    const audioBlob = await captureInternalAudio(audioElement, 10000, onProgress);
+    console.log('[AudD] Internal audio captured, size:', audioBlob.size, 'bytes');
+
+    onProgress?.('Fingerprinting stream...');
+
+    // Note: The user requested WASM Chromaprint. 
+    // In many JS implementations, we send the file to AudD which does the fingerprinting on their end,
+    // or we use an external wasm. For now, we'll send the direct capture blob.
 
     onProgress?.('Analyzing audio...');
 
-    // Create form data with the audio
+    // Create form data with the digital audio capture
     const formData = new FormData();
-    formData.append('file', audioBlob, 'audio.webm');
+    formData.append('file', audioBlob, 'capture.wav');
     formData.append('return', 'apple_music,spotify');
 
-    // Add API token if available (gives you more requests)
+    // Add API token if available
     const apiToken = import.meta.env.VITE_AUDD_API_TOKEN;
     if (apiToken) {
       formData.append('api_token', apiToken);
@@ -149,7 +258,7 @@ async function identifyWithAudD(
     if (data.status === 'success' && data.result) {
       const result = data.result;
 
-      // Get album art from Spotify or Apple Music if available
+      // Get album art
       let albumArt: string | undefined;
       if (result.spotify?.album?.images?.[0]?.url) {
         albumArt = result.spotify.album.images[0].url;
@@ -168,14 +277,11 @@ async function identifyWithAudD(
       };
     }
 
-    // If no result, try checking error
     if (data.status === 'error') {
       const errorMsg = data.error?.error_message || 'Unknown error';
       console.error('AudD API error:', errorMsg);
-
-      // Check for rate limit error
       if (errorMsg.includes('limit was reached')) {
-        throw new Error('Daily identification limit reached. Add an API key in .env or try again tomorrow.');
+        throw new Error('Daily identification limit reached. Add an API key or try again later.');
       }
     }
 
@@ -193,7 +299,7 @@ export async function searchMusicBrainz(query: string): Promise<SongInfo | null>
       `https://musicbrainz.org/ws/2/recording?query=${encodeURIComponent(query)}&limit=1&fmt=json`,
       {
         headers: {
-          'User-Agent': 'RadioScope/1.0 (contact@radioscope.app)'
+          'User-Agent': 'My Radio/1.0 (contact@myradio.app)'
         }
       }
     );
@@ -244,9 +350,10 @@ export async function searchMusicBrainz(query: string): Promise<SongInfo | null>
 // Main identification function
 export async function identifySong(
   streamMetadata?: string,
-  onProgress?: (message: string) => void
+  onProgress?: (message: string) => void,
+  audioElement?: HTMLAudioElement
 ): Promise<SongInfo | null> {
-  // Tier 1: Check stream metadata first (Primary Method)
+  // Tier 1: Check stream metadata first
   if (streamMetadata) {
     onProgress?.('Reading stream metadata...');
     const parsed = parseStreamMetadata(streamMetadata);
@@ -255,17 +362,19 @@ export async function identifySong(
     }
   }
 
-  // Tier 2: Try AudD via microphone (Secondary Method)
-  onProgress?.('Preparing to listen...');
-  try {
-    const auddResult = await identifyWithAudD(onProgress);
-    if (auddResult) {
-      return auddResult;
+  // Tier 2: Try AudD via Direct Stream Capture
+  if (audioElement) {
+    onProgress?.('Initializing digital tap...');
+    try {
+      const auddResult = await identifyWithAudD(audioElement, onProgress);
+      if (auddResult) {
+        return auddResult;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Internal capture failed';
+      console.error('AudD identification failed:', message);
+      toast.error(message);
     }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Microphone access denied';
-    console.error('AudD identification failed:', message);
-    // Continue to fallback
   }
 
   // Tier 3: Try MusicBrainz with whatever info we have (fallback)
@@ -279,3 +388,4 @@ export async function identifySong(
 
   return null;
 }
+

@@ -1,14 +1,20 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Slider } from "@/components/ui/slider";
 import { ChevronLeft, ChevronRight, Play, Pause, Heart, Loader, Volume2, Radio as RadioIcon, MapPin, X, Headphones, Sun, Moon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { searchStationsByGenres, type RadioStation, getCountryFlag } from "@/services/radioBrowserApi";
+import { RadioInterface } from "@/components/RadioInterface";
+import { searchStationsByGenres, type RadioStation, getCountryFlag, regionToCountries } from "@/services/radioBrowserApi";
+import { getApprovedLocalStations } from "@/services/localStationService";
 import { toast } from "sonner";
 import { StaticAudioPlayer } from "@/components/StaticAudioPlayer";
 import { RadioPlayer } from "@/components/RadioPlayer";
 import { NowPlaying } from "@/components/NowPlaying";
 import SavedStations from "@/components/SavedStations";
+import { UserAuth } from "@/components/UserAuth";
+import { Navbar } from "@/components/Navbar";
+import { useAuth } from "@/context/AuthContext";
+import { supabase } from "@/lib/supabase";
 import {
   Select,
   SelectContent,
@@ -21,7 +27,11 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
 } from "@/components/ui/dialog";
+
+import { useAudio } from "@/context/AudioContext";
+import { useSavedLibrary } from "@/hooks/useSavedLibrary";
 
 const moodToGenres: Record<string, string[]> = {
   all: ['rock', 'jazz', 'electronic', 'folk', 'classical', 'blues', 'indie', 'soul'],
@@ -33,34 +43,43 @@ const moodToGenres: Record<string, string[]> = {
   'energetic': ['rock', 'metal', 'electronic', 'hip-hop'],
 };
 
-const regionToCountries: Record<string, string[]> = {
-  all: [],
-  'north-america': ['US', 'CA', 'MX'],
-  'south-america': ['BR', 'AR', 'CO', 'CL', 'PE'],
-  'europe': ['GB', 'DE', 'FR', 'ES', 'IT', 'NL', 'PL', 'SE'],
-  'asia': ['JP', 'KR', 'CN', 'IN', 'TH', 'ID'],
-  'africa': ['ZA', 'NG', 'KE', 'EG', 'MA'],
-  'oceania': ['AU', 'NZ'],
-};
+
 
 const Radio = () => {
   const navigate = useNavigate();
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentStationIndex, setCurrentStationIndex] = useState(0);
-  const [volume, setVolume] = useState(75);
-  const [stations, setStations] = useState<RadioStation[]>([]);
-  const [loading, setLoading] = useState(true);
+  const {
+    currentStation,
+    isPlaying,
+    volume,
+    stations,
+    loading,
+    isConnecting,
+    streamMetadata,
+    playStation,
+    togglePlay,
+    nextStation,
+    prevStation,
+    setVolume,
+    setStations,
+    currentStationIndex,
+    activeMode,
+    homeRadio,
+    exploreRadio,
+    handleStreamError,
+    audioRef
+  } = useAudio();
+
   const [mood, setMood] = useState<string>('all');
   const [region, setRegion] = useState<string>('all');
-  const [savedStations, setSavedStations] = useState<string[]>([]);
-  const [showMapDialog, setShowMapDialog] = useState(false);
-  const [activeTab, setActiveTab] = useState("player");
-  const [offlineStations, setOfflineStations] = useState<Set<string>>(new Set());
-  const [streamMetadata, setStreamMetadata] = useState<string | null>(null);
-  const [isConnecting, setIsConnecting] = useState(false);
+  // Use the global hook for saved library sync
+  const { isStationSaved, saveStation, removeStation } = useSavedLibrary();
+  const { user } = useAuth();
 
-  // User preferences from localStorage - CLEARED and RELOADED fresh each time
-  const [userPreferences, setUserPreferences] = useState<string[]>([]);
+  const [showMapDialog, setShowMapDialog] = useState(false);
+
+  // Submit station form
+  const [submitStationName, setSubmitStationName] = useState("");
+  const [submitStationUrl, setSubmitStationUrl] = useState("");
 
   const [isDarkMode, setIsDarkMode] = useState(() => {
     // Check localStorage or system preference
@@ -72,13 +91,6 @@ const Radio = () => {
     return false;
   });
 
-  // Submit station form
-  const [submitStationName, setSubmitStationName] = useState("");
-  const [submitStationUrl, setSubmitStationUrl] = useState("");
-
-  const currentStation = stations[currentStationIndex];
-  const isCurrentOffline = currentStation && offlineStations.has(currentStation.stationuuid);
-
   // Dark mode toggle effect
   useEffect(() => {
     if (isDarkMode) {
@@ -89,41 +101,78 @@ const Radio = () => {
     localStorage.setItem('darkMode', String(isDarkMode));
   }, [isDarkMode]);
 
+  const [activeTab, setActiveTab] = useState("player");
+  const [offlineStations, setOfflineStations] = useState<Set<string>>(new Set());
+  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialStationRef = useRef<RadioStation | null>(null);
+
+  // Check for initial station in URL parameters
   useEffect(() => {
-    const saved = localStorage.getItem('savedStations');
-    if (saved) {
-      setSavedStations(JSON.parse(saved));
+    const urlParam = searchParams.get('url');
+    const nameParam = searchParams.get('name');
+    const countryParam = searchParams.get('country');
+
+    if (urlParam && nameParam) {
+      initialStationRef.current = {
+        stationuuid: `param-${Date.now()}`,
+        name: nameParam,
+        url_resolved: urlParam,
+        country: countryParam || 'Unknown',
+        countrycode: '',
+        tags: '',
+        favicon: '',
+      };
+      console.log('Detected station in URL params:', initialStationRef.current);
     }
-  }, []);
+  }, []); // Only on mount
+  // User preferences from localStorage - CLEARED and RELOADED fresh each time
+  const [userPreferences, setUserPreferences] = useState<string[]>([]);
 
   // Load user preferences from localStorage on mount and when navigating back
-  // Track if we've loaded preferences to prevent race conditions
-  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
-
   useEffect(() => {
-    const loadPreferences = () => {
-      // COMPLETELY CLEAR the state before loading
+    const loadPreferences = async () => {
+      setPreferencesLoaded(false);
       setUserPreferences([]);
 
+      // 1. Try cloud if logged in
+      if (user) {
+        try {
+          const { data, error } = await supabase
+            .from('user_preferences')
+            .select('genres')
+            .eq('user_id', user.id)
+            .single();
+
+          if (data?.genres && Array.isArray(data.genres)) {
+            console.log('Cloud preferences loaded:', data.genres);
+            setUserPreferences(data.genres);
+            setPreferencesLoaded(true);
+            return;
+          }
+        } catch (e) {
+          console.error('Error loading cloud preferences:', e);
+        }
+      }
+
+      // 2. Fallback to LocalStorage
       const savedGenres = localStorage.getItem('userGenres');
       if (savedGenres) {
         try {
           const parsed = JSON.parse(savedGenres);
-          // Only use if it's a valid, non-empty array
           if (Array.isArray(parsed) && parsed.length > 0) {
-            console.log('User preferences loaded:', parsed);
+            console.log('Local preferences loaded:', parsed);
             setUserPreferences(parsed);
           }
         } catch (e) {
-          console.error('Error parsing user preferences:', e);
+          console.error('Error parsing local preferences:', e);
         }
       }
-      // Mark as loaded AFTER processing
       setPreferencesLoaded(true);
     };
 
     loadPreferences();
-  }, []); // Only run once on mount
+  }, [user]);
 
   useEffect(() => {
     // DON'T fetch until preferences have been loaded
@@ -133,7 +182,7 @@ const Radio = () => {
     }
 
     const fetchStations = async () => {
-      setLoading(true);
+      // setLoading(true); // Handled by context now
       setOfflineStations(new Set());
 
       // PRIORITY: Determine which genres to use - CLEAR LOGIC
@@ -153,8 +202,22 @@ const Radio = () => {
         console.log('Using default genres (no preferences):', genresToFetch);
       }
 
-      // Fetch stations with the determined genres
-      let data = await searchStationsByGenres(genresToFetch);
+      // Fetch both local curated stations and global ones
+      const [localData, globalData] = await Promise.all([
+        getApprovedLocalStations(genresToFetch),
+        searchStationsByGenres(genresToFetch)
+      ]);
+
+      // Merge results - PRIORITIZE local/curated stations by putting them first
+      let data = [...localData];
+
+      // Add global stations that aren't already represented by a local curated one
+      globalData.forEach((gStation) => {
+        const isAlreadyLocal = localData.some(l => l.stationuuid === gStation.stationuuid);
+        if (!isAlreadyLocal) {
+          data.push(gStation);
+        }
+      });
 
       // Filter by region if selected
       if (region !== 'all') {
@@ -162,84 +225,64 @@ const Radio = () => {
         data = data.filter(station => countries.includes(station.countrycode));
       }
 
-      setStations(data);
-      setCurrentStationIndex(0);
-      setLoading(false);
+      // If we had a station from URL params, inject it at the start
+      if (initialStationRef.current) {
+        // Remove it if it already exists in the list (avoid duplicates)
+        data = data.filter(s => s.url_resolved !== initialStationRef.current?.url_resolved);
+        data = [initialStationRef.current, ...data];
+
+        // Play it immediately
+        playStation(initialStationRef.current, 'home');
+
+        // Clear the ref so we don't keep injecting it on mood changes
+        initialStationRef.current = null;
+
+        // Also clear URL params so refresh doesn't keep it forever
+        setSearchParams({}, { replace: true });
+      }
+
+      setStations(data, 'home');
+      if (!currentStation && data.length > 0) {
+        playStation(data[0], 'home');
+      }
     };
     fetchStations();
-  }, [mood, region, userPreferences, preferencesLoaded]); // Include preferencesLoaded
+  }, [mood, region, userPreferences, preferencesLoaded]);
 
   const handlePlayPause = () => {
-    setIsPlaying(!isPlaying);
+    togglePlay('home');
   };
 
   const handleNext = () => {
-    if (stations.length > 0) {
-      let nextIndex = (currentStationIndex + 1) % stations.length;
-      // Skip offline stations
-      let attempts = 0;
-      while (offlineStations.has(stations[nextIndex]?.stationuuid) && attempts < stations.length) {
-        nextIndex = (nextIndex + 1) % stations.length;
-        attempts++;
-      }
-      setCurrentStationIndex(nextIndex);
-      setIsPlaying(true);
-    }
+    nextStation('home');
   };
 
   const handlePrevious = () => {
-    if (stations.length > 0) {
-      let prevIndex = (currentStationIndex - 1 + stations.length) % stations.length;
-      // Skip offline stations
-      let attempts = 0;
-      while (offlineStations.has(stations[prevIndex]?.stationuuid) && attempts < stations.length) {
-        prevIndex = (prevIndex - 1 + stations.length) % stations.length;
-        attempts++;
-      }
-      setCurrentStationIndex(prevIndex);
-      setIsPlaying(true);
-    }
-  };
-
-  const handleStreamError = () => {
-    if (currentStation) {
-      setOfflineStations(prev => new Set(prev).add(currentStation.stationuuid));
-      toast.error(`${currentStation.name} is offline after 5 seconds. Skipping...`);
-      // Auto-skip to next station
-      setTimeout(() => handleNext(), 1500);
-    }
+    prevStation('home');
   };
 
   const handleLoadingStart = () => {
-    setIsConnecting(true);
+    // setIsConnecting(true); // Handled by context
   };
 
   const handleLoadingEnd = () => {
-    setIsConnecting(false);
+    // setIsConnecting(false); // Handled by context
   };
 
-  const handleSaveStation = () => {
-    if (!currentStation) return;
+  const handleSaveStation = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    if (!homeRadio.station) return;
 
-    const newSaved = savedStations.includes(currentStation.stationuuid)
-      ? savedStations.filter(id => id !== currentStation.stationuuid)
-      : [...savedStations, currentStation.stationuuid];
-
-    setSavedStations(newSaved);
-    localStorage.setItem('savedStations', JSON.stringify(newSaved));
-
-    // Also save station data for the saved stations view
-    const savedData = JSON.parse(localStorage.getItem('savedStationsData') || '[]');
-    if (!savedStations.includes(currentStation.stationuuid)) {
-      savedData.push(currentStation);
-      localStorage.setItem('savedStationsData', JSON.stringify(savedData));
-      toast.success(`Saved ${currentStation.name} to your collection!`);
+    if (isStationSaved(homeRadio.station.stationuuid)) {
+      removeStation(homeRadio.station.stationuuid);
+      toast.info(`Removed ${homeRadio.station.name} from your collection`);
     } else {
-      toast.info(`Removed ${currentStation.name} from your collection`);
+      saveStation(homeRadio.station);
+      toast.success(`Saved ${homeRadio.station.name} to your collection!`);
     }
   };
 
-  const isSaved = currentStation && savedStations.includes(currentStation.stationuuid);
+  const isSaved = homeRadio.station && isStationSaved(homeRadio.station.stationuuid);
 
   const handleRegionSelect = (selectedRegion: string) => {
     setRegion(selectedRegion);
@@ -247,23 +290,16 @@ const Radio = () => {
   };
 
   const handlePlaySavedStation = (station: RadioStation) => {
-    const index = stations.findIndex(s => s.stationuuid === station.stationuuid);
-    if (index >= 0) {
-      setCurrentStationIndex(index);
-    } else {
-      setStations(prev => [station, ...prev]);
-      setCurrentStationIndex(0);
-    }
-    setIsPlaying(true);
+    playStation(station, 'home');
     setActiveTab("player");
   };
 
   // Share Station functionality
   const handleShareStation = async () => {
-    if (!currentStation) return;
+    if (!homeRadio.station) return;
 
     // Copy streaming link with friendly message
-    const shareMessage = `I think you'd like this station! Give it a listen :)\n${currentStation.url_resolved}`;
+    const shareMessage = `I think you'd like this station! Give it a listen :)\n${homeRadio.station.url_resolved}`;
 
     try {
       await navigator.clipboard.writeText(shareMessage);
@@ -274,16 +310,11 @@ const Radio = () => {
   };
 
   // State for saved stations dialog
-  const [showSavedStations, setShowSavedStations] = useState(false);
+  // Moved to Navbar
 
-  // Handle metadata change from stream
-  const handleMetadataChange = (metadata: string | null) => {
-    setStreamMetadata(metadata);
-  };
-
-  // Reset metadata when station changes
+  // Reset metadata when station changes (handled in context, but keeping here for local reset if needed)
   useEffect(() => {
-    setStreamMetadata(null);
+    // metadata is now handled globally
   }, [currentStationIndex]);
 
   // Submit local station
@@ -307,59 +338,7 @@ const Radio = () => {
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
-      {/* Header with Navigation */}
-      <header className="border-b border-border bg-card sticky top-0 z-50 shadow-md">
-        <div className="container max-w-7xl mx-auto px-6 py-3">
-          <div className="flex items-center justify-between">
-            {/* Logo */}
-            <div className="flex items-center gap-3">
-              <Headphones className="w-7 h-7 text-primary" />
-              <h1 className="text-xl font-bold text-foreground">RadioScope</h1>
-            </div>
-
-            {/* Navigation Tabs */}
-            <nav className="flex items-center gap-2">
-              <Button
-                variant="ghost"
-                onClick={() => navigate('/explore')}
-                className="text-foreground/70 hover:text-foreground hover:bg-muted"
-              >
-                Explore
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={() => navigate('/onboarding')}
-                className="text-foreground/70 hover:text-foreground hover:bg-muted"
-              >
-                Preferences
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={() => setShowSavedStations(true)}
-                className="text-foreground/70 hover:text-foreground hover:bg-muted"
-              >
-                <Heart className="w-4 h-4 mr-1" />
-                Saved
-              </Button>
-            </nav>
-
-            {/* Dark Mode Toggle */}
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={() => setIsDarkMode(!isDarkMode)}
-              className="border-2"
-              aria-label={isDarkMode ? "Switch to light mode" : "Switch to dark mode"}
-            >
-              {isDarkMode ? (
-                <Sun className="w-5 h-5 text-yellow-500" />
-              ) : (
-                <Moon className="w-5 h-5 text-slate-700" />
-              )}
-            </Button>
-          </div>
-        </div>
-      </header>
+      <Navbar isDarkMode={isDarkMode} setIsDarkMode={setIsDarkMode} />
 
       {/* Main Radio Container - more top margin for gap from header */}
       <div className="flex-1 flex flex-col items-center justify-center p-4 md:p-8">
@@ -403,17 +382,20 @@ const Radio = () => {
               <div className="flex-1 flex flex-col items-center justify-start relative z-10">
 
                 {/* Station Display Box - rotation removed */}
-                <div className="bg-[#F9F9FB] dark:bg-[#1a202c] border-4 border-[#331F21] dark:border-[#718096] rounded-lg px-8 py-4 mb-4 w-full max-w-md text-center shadow-[inset_0_2px_4px_rgba(0,0,0,0.1)]">
+                <div className="bg-[#F9F9FB] dark:bg-[#1a202c] border-4 border-[#331F21] dark:border-[#718096] rounded-lg px-8 py-4 mb-4 w-full max-w-md text-center shadow-[inset_0_2px_4px_rgba(0,0,0,0.1)] relative">
                   <h2 className="text-2xl font-bold text-[#331F21] dark:text-[#f7fafc] truncate font-mono">
-                    {loading ? "LOADING..." : currentStation?.name || "SELECT STATION"}
+                    {loading && activeMode === 'home'
+                      ? "LOADING..."
+                      : homeRadio.station?.name || "SELECT STATION"
+                    }
                   </h2>
                   <div className="flex items-center justify-center gap-2 text-[#331F21]/70 dark:text-white mt-1 font-mono text-sm">
-                    {isConnecting ? (
+                    {isConnecting && activeMode === 'home' ? (
                       <span className="animate-pulse">CONNECTING...</span>
                     ) : (
                       <>
-                        <span className="text-lg">{currentStation && getCountryFlag(currentStation.countrycode)}</span>
-                        <span>{currentStation?.country || "UNKNOWN LOCATION"}</span>
+                        <span className="text-lg">{homeRadio.station && getCountryFlag(homeRadio.station.countrycode)}</span>
+                        <span>{homeRadio.station?.country || "UNKNOWN LOCATION"}</span>
                       </>
                     )}
                   </div>
@@ -422,9 +404,10 @@ const Radio = () => {
                 {/* What Song Is That? Button (Integrated NowPlaying) */}
                 <div className="mb-8">
                   <NowPlaying
-                    streamMetadata={streamMetadata}
-                    isPlaying={isPlaying}
-                    stationName={currentStation?.name || ''}
+                    streamMetadata={homeRadio.streamMetadata}
+                    isPlaying={homeRadio.isPlaying}
+                    stationName={homeRadio.station?.name || ''}
+                    audioRef={audioRef}
                   />
                 </div>
 
@@ -478,10 +461,10 @@ const Radio = () => {
                     {/* Main Play Button */}
                     <button
                       onClick={handlePlayPause}
-                      className={`w-20 h-20 md:w-24 md:h-24 border-4 border-[#331F21] rounded-xl flex items-center justify-center shadow-[4px_4px_0_#331F21] active:shadow-none active:translate-x-1 active:translate-y-1 transition-all ${isPlaying ? 'bg-[#E9EFE4]' : 'bg-[#D3E1E6]'
+                      className={`w-20 h-20 md:w-24 md:h-24 border-4 border-[#331F21] rounded-xl flex items-center justify-center shadow-[4px_4px_0_#331F21] active:shadow-none active:translate-x-1 active:translate-y-1 transition-all ${homeRadio.isPlaying ? 'bg-[#E9EFE4]' : 'bg-[#D3E1E6]'
                         }`}
                     >
-                      {isPlaying ? (
+                      {homeRadio.isPlaying ? (
                         <Pause className="w-10 h-10 text-[#331F21]" fill="currentColor" />
                       ) : (
                         <Play className="w-10 h-10 text-[#331F21] ml-1" fill="currentColor" />
@@ -530,8 +513,9 @@ const Radio = () => {
             </div>
           </div>
 
-          {/* Volume Slider (Outside Radio) - Centered */}
-          <div className="w-full max-w-md mt-8 px-8 mx-auto">
+          {/* Volume Slider & Smart Skip (Outside Radio) - Centered */}
+          <div className="w-full max-w-md mt-8 px-8 mx-auto flex flex-col items-center gap-6">
+
             <Slider
               value={[volume]}
               onValueChange={(value) => setVolume(value[0])}
@@ -544,24 +528,12 @@ const Radio = () => {
           {/* Static Audio Player - plays during loading */}
           <StaticAudioPlayer isPlaying={isConnecting} volume={volume * 0.6} />
 
-          {/* Hidden Audio Element */}
-          {currentStation && (
-            <RadioPlayer
-              isPlaying={isPlaying}
-              streamUrl={currentStation.url_resolved}
-              volume={volume}
-              onStreamError={handleStreamError}
-              onLoadingStart={handleLoadingStart}
-              onLoadingEnd={handleLoadingEnd}
-              onMetadataChange={handleMetadataChange}
-            />
-          )}
-
           {/* Location Map Dialog */}
           <Dialog open={showMapDialog} onOpenChange={setShowMapDialog}>
             <DialogContent className="max-w-2xl bg-[#F9F9FB] dark:bg-card border-4 border-[#331F21] dark:border-border">
               <DialogHeader>
                 <DialogTitle className="text-2xl font-bold text-[#331F21] dark:text-foreground font-mono">SELECT REGION</DialogTitle>
+                <DialogDescription className="sr-only">Select a region to filter stations</DialogDescription>
               </DialogHeader>
               <div className="grid grid-cols-2 gap-4 mt-4">
                 {Object.keys(regionToCountries).map((r) => (
@@ -584,15 +556,6 @@ const Radio = () => {
             </DialogContent>
           </Dialog>
 
-          {/* Saved Stations Dialog */}
-          <Dialog open={showSavedStations} onOpenChange={setShowSavedStations}>
-            <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto bg-[#F9F9FB] dark:bg-card border-4 border-[#331F21] dark:border-border">
-              <DialogHeader>
-                <DialogTitle className="text-2xl font-bold text-[#331F21] dark:text-foreground font-mono">YOUR SAVED STATIONS</DialogTitle>
-              </DialogHeader>
-              <SavedStations onPlayStation={handlePlaySavedStation} />
-            </DialogContent>
-          </Dialog>
         </div>
       </div>
     </div>
