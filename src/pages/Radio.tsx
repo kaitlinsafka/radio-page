@@ -7,6 +7,7 @@ import { RadioInterface } from "@/components/RadioInterface";
 import { searchStationsByGenres, type RadioStation, getCountryFlag, regionToCountries } from "@/services/radioBrowserApi";
 import { getApprovedLocalStations } from "@/services/localStationService";
 import { toast } from "sonner";
+import { StationFeedbackModal } from "@/components/StationFeedbackModal";
 import { StaticAudioPlayer } from "@/components/StaticAudioPlayer";
 import { RadioPlayer } from "@/components/RadioPlayer";
 import { NowPlaying } from "@/components/NowPlaying";
@@ -86,7 +87,7 @@ const Radio = () => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('darkMode');
       if (saved !== null) return saved === 'true';
-      return window.matchMedia('(prefers-color-scheme: dark)').matches;
+      return false; // Always default to light mode (false) for new users
     }
     return false;
   });
@@ -103,6 +104,7 @@ const Radio = () => {
 
   const [activeTab, setActiveTab] = useState("player");
   const [offlineStations, setOfflineStations] = useState<Set<string>>(new Set());
+  const [showFeedbackModal, setShowFeedbackModal] = useState(false);
   const [preferencesLoaded, setPreferencesLoaded] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
   const initialStationRef = useRef<RadioStation | null>(null);
@@ -523,6 +525,13 @@ const Radio = () => {
               step={1}
               className="w-full"
             />
+
+            <button
+              onClick={() => setShowFeedbackModal(true)}
+              className="text-[10px] font-black uppercase text-[#331F21]/40 hover:text-[#331F21] transition-colors underline decoration-2 underline-offset-4"
+            >
+              Something not sounding right? Let me know!
+            </button>
           </div>
 
           {/* Static Audio Player - plays during loading */}
@@ -558,6 +567,12 @@ const Radio = () => {
 
         </div>
       </div>
+
+      <StationFeedbackModal
+        isOpen={showFeedbackModal}
+        onClose={() => setShowFeedbackModal(false)}
+        station={homeRadio.station ? { id: homeRadio.station.stationuuid, name: homeRadio.station.name } : null}
+      />
     </div>
   );
 };

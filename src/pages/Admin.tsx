@@ -7,7 +7,7 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
 import { Button } from "@/components/ui/button";
-import { LayoutDashboard, Users, Radio, Check, X, ArrowLeft, Globe, Loader2, Trash2, RotateCcw, Search, ExternalLink, Play, Zap, Music } from "lucide-react";
+import { LayoutDashboard, Users, Radio, Check, X, ArrowLeft, Globe, Loader2, Trash2, RotateCcw, Search, ExternalLink, Play, Zap, Music, MessageSquare } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -21,6 +21,7 @@ const Admin = () => {
     const navigate = useNavigate();
 
     const [requests, setRequests] = useState<any[]>([]);
+    const [feedback, setFeedback] = useState<any[]>([]);
     const [bulkUrl, setBulkUrl] = useState("");
     const adChannelRef = useRef<any>(null);
 
@@ -87,6 +88,13 @@ const Admin = () => {
                     .order('updated_at', { ascending: false })
                     .limit(200);
                 setHistory(historyData || []);
+
+                // 4. Fetch Feedback
+                const { data: feedbackData } = await supabase
+                    .from('station_feedback')
+                    .select('*')
+                    .order('created_at', { ascending: false });
+                setFeedback(feedbackData || []);
             } catch (err: any) {
                 console.error("Admin fetch error:", err);
                 toast.error("Failed to fetch admin data: " + (err.message || "Unknown error"));
@@ -97,6 +105,23 @@ const Admin = () => {
 
         if (profile?.is_admin) fetchAdminData();
     }, [profile]);
+
+    const handleFeedbackStatusToggle = async (feedbackId: string, currentStatus: string) => {
+        const newStatus = currentStatus === 'pending' ? 'solved' : 'pending';
+        try {
+            const { error } = await supabase
+                .from('station_feedback')
+                .update({ status: newStatus })
+                .eq('id', feedbackId);
+
+            if (error) throw error;
+
+            setFeedback(prev => prev.map(f => f.id === feedbackId ? { ...f, status: newStatus } : f));
+            toast.success(`Feedback marked as ${newStatus}`);
+        } catch (err) {
+            toast.error("Failed to update feedback status");
+        }
+    };
 
     const handleModeration = async (requestId: string, status: 'approved' | 'rejected') => {
         try {
@@ -472,9 +497,9 @@ const Admin = () => {
                         <p className="text-3xl font-black text-[#331F21]">{requests.length}</p>
                     </div>
                     <div className="bg-[#D3E1E6] border-4 border-[#331F21] p-6 rounded-2xl shadow-[6px_6px_0_#331F21]">
-                        <Globe className="w-8 h-8 text-[#331F21] mb-2" />
-                        <h3 className="text-xs font-black opacity-50 uppercase tracking-widest">Live Platform Data</h3>
-                        <p className="text-3xl font-black text-[#331F21]">ACTIVE</p>
+                        <MessageSquare className="w-8 h-8 text-[#331F21] mb-2" />
+                        <h3 className="text-xs font-black opacity-50 uppercase tracking-widest">Station Reports</h3>
+                        <p className="text-3xl font-black text-[#331F21]">{feedback.length}</p>
                     </div>
                 </div>
 
@@ -764,6 +789,12 @@ const Admin = () => {
                             >
                                 Tag Management
                             </TabsTrigger>
+                            <TabsTrigger
+                                value="feedback"
+                                className="rounded-lg px-8 py-2 font-black uppercase text-xs data-[state=active]:bg-[#331F21] data-[state=active]:text-white"
+                            >
+                                Station Feedback
+                            </TabsTrigger>
                         </TabsList>
 
                         <TabsContent value="moderation" className="mt-0">
@@ -986,6 +1017,86 @@ const Admin = () => {
                                                         selectedTags={item.genre ? item.genre.split(/,\s*/).filter(Boolean) : []}
                                                         onTagsChange={(newTags) => handleUpdateTags(item.id, newTags, 'history')}
                                                     />
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </TabsContent>
+
+                        <TabsContent value="feedback" className="mt-0">
+                            <div className="space-y-6">
+                                <div className="flex justify-between items-center">
+                                    <h2 className="text-xl font-black text-[#331F21] uppercase flex items-center gap-3">
+                                        <MessageSquare className="w-6 h-6" />
+                                        Station Feedback Queue ({feedback.length})
+                                    </h2>
+                                    <p className="text-xs font-bold opacity-40 uppercase">User-submitted quality reports</p>
+                                </div>
+
+                                {feedback.length === 0 ? (
+                                    <div className="bg-white border-4 border-[#331F21] rounded-3xl p-24 flex flex-col items-center justify-center text-center opacity-40">
+                                        <MessageSquare className="w-20 h-20 mb-6" />
+                                        <p className="font-black text-2xl uppercase">No feedback reported</p>
+                                        <p className="font-bold mt-2">Everything sounds great! 🎉</p>
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                        {feedback.map(item => (
+                                            <div key={item.id} className={cn(
+                                                "bg-white border-4 border-[#331F21] p-6 rounded-2xl flex flex-col gap-4 shadow-[4px_4px_0_#331F21] transition-all",
+                                                item.status === 'solved' ? "opacity-60" : "opacity-100"
+                                            )}>
+                                                <div className="flex items-start justify-between gap-4">
+                                                    <div className="flex-1">
+                                                        <div className="flex items-center gap-3 mb-1">
+                                                            <h4 className="font-black text-[#331F21] uppercase text-lg leading-tight">{item.station_name}</h4>
+                                                            <span className={cn(
+                                                                "text-[8px] font-black uppercase px-2 py-0.5 rounded shrink-0",
+                                                                item.status === 'solved' ? "bg-green-100 text-green-700" : "bg-yellow-100 text-yellow-700"
+                                                            )}>
+                                                                {item.status}
+                                                            </span>
+                                                        </div>
+                                                        <div className="flex items-center gap-2 mb-3">
+                                                            <span className="text-[10px] font-bold text-[#331F21]/40 uppercase tracking-widest bg-[#F9F9FB] px-2 py-0.5 rounded border border-[#331F21]/5">
+                                                                {item.category === 'genre_mismatch' ? 'Genre Mismatch' : 'Other'}
+                                                            </span>
+                                                            <span className="text-[10px] font-medium text-[#331F21]/40">
+                                                                {new Date(item.created_at).toLocaleDateString()}
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex gap-2">
+                                                        <Button
+                                                            variant="outline"
+                                                            size="sm"
+                                                            onClick={() => handleFeedbackStatusToggle(item.id, item.status)}
+                                                            className={cn(
+                                                                "border-2 border-[#331F21] font-black uppercase text-[10px] h-9 px-4 rounded-xl",
+                                                                item.status === 'solved' ? "bg-green-50 text-green-700" : "bg-[#331F21] text-white hover:bg-[#331F21]/90"
+                                                            )}
+                                                        >
+                                                            {item.status === 'solved' ? 'Mark Pending' : 'Mark Solved'}
+                                                        </Button>
+                                                    </div>
+                                                </div>
+
+                                                <div className="bg-[#F9F9FB] border-2 border-[#331F21]/5 rounded-xl p-4">
+                                                    {item.category === 'genre_mismatch' && (
+                                                        <p className="text-[10px] font-black uppercase text-red-500 mb-2">
+                                                            Violating Genre: <span className="bg-red-50 px-2 py-0.5 rounded border border-red-100">{item.violating_genre}</span>
+                                                        </p>
+                                                    )}
+                                                    <p className="text-sm font-medium text-[#331F21]/80 italic">
+                                                        "{item.message || (item.category === 'genre_mismatch' ? 'No additional message provided' : 'No details provided')}"
+                                                    </p>
+                                                </div>
+
+                                                <div className="flex items-center justify-between pt-2">
+                                                    <p className="text-[9px] font-bold text-[#331F21]/30 uppercase">User ID: {item.user_id?.substring(0, 8)}...</p>
+                                                    <p className="text-[9px] font-bold text-[#331F21]/30 uppercase">Station ID: {item.station_id?.substring(0, 8)}...</p>
                                                 </div>
                                             </div>
                                         ))}

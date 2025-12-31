@@ -82,6 +82,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     const metadataIntervalRef = useRef<number | null>(null);
     const connectionTimeoutRef = useRef<number | null>(null);
+    const hardTimeoutRef = useRef<number | null>(null);
+    const stallTimeoutRef = useRef<number | null>(null);
     const hasConnectedRef = useRef(false);
     const currentStreamUrlRef = useRef<string>('');
 
@@ -93,12 +95,33 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const currentStationRef = useRef(currentStation);
     currentStationRef.current = currentStation;
 
-    const clearConnectionTimeout = useCallback(() => {
+    const clearTimeouts = useCallback(() => {
         if (connectionTimeoutRef.current) {
             clearTimeout(connectionTimeoutRef.current);
             connectionTimeoutRef.current = null;
         }
+        if (hardTimeoutRef.current) {
+            clearTimeout(hardTimeoutRef.current);
+            hardTimeoutRef.current = null;
+        }
+        if (stallTimeoutRef.current) {
+            clearTimeout(stallTimeoutRef.current);
+            stallTimeoutRef.current = null;
+        }
     }, []);
+
+    const forceSkip = useCallback((reason: string) => {
+        console.warn(`[AudioContext] Force skip triggered: ${reason}`);
+        if (audioRef.current) {
+            audioRef.current.pause();
+            audioRef.current.src = "";
+            audioRef.current.load(); // Forces cleanup of pending requests
+        }
+        clearTimeouts();
+        setIsConnecting(false);
+        toast.info(reason === 'timeout' ? "Station taking too long, skipping..." : "Stream stalled, finding new station...");
+        nextStation();
+    }, [clearTimeouts]);
 
     const checkMetadata = useCallback(() => {
         if (!audioRef.current) return;
@@ -137,41 +160,63 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (!audioRef.current) {
             audioRef.current = new Audio();
             audioRef.current.volume = volume / 100;
+            audioRef.current.preload = "auto";
         }
 
         const audio = audioRef.current;
 
         const handleCanPlay = () => {
-            clearConnectionTimeout();
+            clearTimeouts();
             setIsConnecting(false);
             hasConnectedRef.current = true;
             checkMetadata();
         };
 
         const handlePlaying = () => {
-            clearConnectionTimeout();
+            clearTimeouts();
             setIsConnecting(false);
             hasConnectedRef.current = true;
         };
 
+        const handleWaiting = () => {
+            // Only trigger stall detection if we had already successfully connected once
+            if (hasConnectedRef.current && !stallTimeoutRef.current) {
+                stallTimeoutRef.current = window.setTimeout(() => {
+                    forceSkip('stall');
+                }, 5000);
+            }
+        };
+
+        const handleStalled = () => {
+            if (hasConnectedRef.current && !stallTimeoutRef.current) {
+                stallTimeoutRef.current = window.setTimeout(() => {
+                    forceSkip('stall');
+                }, 5000);
+            }
+        };
+
         const handleError = (e: Event) => {
             console.error('[AudioContext] Stream error:', e);
-            if (!hasConnectedRef.current && !connectionTimeoutRef.current) {
-                clearConnectionTimeout();
+            if (!hasConnectedRef.current) {
+                clearTimeouts();
                 setIsConnecting(false);
             }
         };
 
         audio.addEventListener('canplay', handleCanPlay);
         audio.addEventListener('playing', handlePlaying);
+        audio.addEventListener('waiting', handleWaiting);
+        audio.addEventListener('stalled', handleStalled);
         audio.addEventListener('error', handleError);
 
         return () => {
             audio.removeEventListener('canplay', handleCanPlay);
             audio.removeEventListener('playing', handlePlaying);
+            audio.removeEventListener('waiting', handleWaiting);
+            audio.removeEventListener('stalled', handleStalled);
             audio.removeEventListener('error', handleError);
         };
-    }, [checkMetadata, clearConnectionTimeout, volume]);
+    }, [checkMetadata, clearTimeouts, volume, forceSkip]);
 
     const attemptConnection = useCallback((stage: number, streamUrl: string) => {
         const audio = audioRef.current;
@@ -196,7 +241,17 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             finalUrl = streamUrl;
         }
 
-        clearConnectionTimeout();
+        clearTimeouts();
+
+        // Start Hard Timeout (7 seconds) if this is the first stage
+        if (stage === STAGE_PROXY) {
+            hardTimeoutRef.current = window.setTimeout(() => {
+                if (!hasConnectedRef.current && isPlaying) {
+                    forceSkip('timeout');
+                }
+            }, 7000);
+        }
+
         connectionTimeoutRef.current = window.setTimeout(() => {
             if (!hasConnectedRef.current && isConnecting) {
                 if (stage < STAGE_DIRECT_UNRESTRICTED) {
@@ -217,7 +272,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 }
             }
         });
-    }, [clearConnectionTimeout, isConnecting, isPlaying]);
+    }, [clearTimeouts, isConnecting, isPlaying]);
 
     // Handle Playback Logic
     useEffect(() => {
@@ -235,7 +290,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 metadataIntervalRef.current = window.setInterval(checkMetadata, 10000);
             }
         } else {
-            clearConnectionTimeout();
+            clearTimeouts();
             setIsConnecting(false);
             audioRef.current?.pause();
             if (metadataIntervalRef.current) {
@@ -243,7 +298,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 metadataIntervalRef.current = null;
             }
         }
-    }, [isPlaying, currentStation, attemptConnection, checkMetadata, clearConnectionTimeout]);
+    }, [isPlaying, currentStation, attemptConnection, checkMetadata, clearTimeouts]);
 
     // Handle Volume
     useEffect(() => {

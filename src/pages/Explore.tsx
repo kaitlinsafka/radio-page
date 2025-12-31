@@ -40,7 +40,8 @@ const Explore = () => {
   // Dark mode state
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const saved = localStorage.getItem('darkMode');
-    return saved ? JSON.parse(saved) : false;
+    if (saved !== null) return saved === 'true';
+    return false; // Always default to light mode (false) for new users
   });
 
   // Apply dark mode
