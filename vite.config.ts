@@ -12,6 +12,11 @@ export default defineConfig(({ mode }) => ({
       '/api': {
         target: 'http://localhost:3000',
         changeOrigin: true,
+        configure: (proxy, options) => {
+          proxy.on('proxyRes', (proxyRes, req, res) => {
+            res.setHeader('Access-Control-Allow-Origin', '*');
+          });
+        }
       },
     },
   },

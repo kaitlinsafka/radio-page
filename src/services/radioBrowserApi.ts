@@ -12,6 +12,7 @@ export interface RadioStation {
   votes?: number;
   clickcount?: number;
   isOffline?: boolean;
+  isManual?: boolean;
 }
 
 // Hardcoded fallbacks in case discovery fails

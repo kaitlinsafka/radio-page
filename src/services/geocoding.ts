@@ -108,15 +108,41 @@ export const geocodeStation = (station: { city?: string; state?: string; country
     }
 
     // 2. Try country code fallback
-    if (station.countrycode && countryCoordinates[station.countrycode]) {
+    if (station.countrycode && countryCoordinates[station.countrycode.toUpperCase()]) {
         // Add small randomization to prevent multiple stations from stacking exactly on top of each other
-        const base = countryCoordinates[station.countrycode];
+        const base = countryCoordinates[station.countrycode.toUpperCase()];
         return {
             lat: base.lat + (Math.random() - 0.5) * 2, // +/- 1 degree
             lng: base.lng + (Math.random() - 0.5) * 2
         };
     }
 
-    // 2. Default to world center if nothing else
+    // 3. Try country name fallback
+    if (station.country) {
+        // Find if any country in our map matches the name
+        // This is a simple case-insensitive check
+        const countryName = station.country.toLowerCase();
+
+        // Some common mappings for names to codes if they aren't in the object keys
+        const nameToCode: Record<string, string> = {
+            'united states': 'US',
+            'usa': 'US',
+            'united kingdom': 'GB',
+            'uk': 'GB',
+            'great britain': 'GB',
+            'estonia': 'EE'
+        };
+
+        const code = nameToCode[countryName];
+        if (code && countryCoordinates[code]) {
+            const base = countryCoordinates[code];
+            return {
+                lat: base.lat + (Math.random() - 0.5) * 2,
+                lng: base.lng + (Math.random() - 0.5) * 2
+            };
+        }
+    }
+
+    // 4. Default to world center if nothing else
     return null;
 };

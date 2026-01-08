@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom';
 import { RadioStation } from '@/services/radioBrowserApi';
 import { toast } from 'sonner';
 import { getAnalyserNode, initializeAudioTap } from "@/services/songIdentification";
+import { sanitizeStreamUrl } from "@/services/urlSanitizer";
 
 export interface RadioState {
     station: RadioStation | null;
@@ -85,6 +86,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const hardTimeoutRef = useRef<number | null>(null);
     const stallTimeoutRef = useRef<number | null>(null);
     const hasConnectedRef = useRef(false);
+    const isConnectingRef = useRef(false);
     const currentStreamUrlRef = useRef<string>('');
 
     // Refs for Stability
@@ -119,6 +121,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
         clearTimeouts();
         setIsConnecting(false);
+        isConnectingRef.current = false;
         toast.info(reason === 'timeout' ? "Station taking too long, skipping..." : "Stream stalled, finding new station...");
         nextStation();
     }, [clearTimeouts]);
@@ -160,7 +163,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (!audioRef.current) {
             audioRef.current = new Audio();
             audioRef.current.volume = volume / 100;
-            audioRef.current.preload = "auto";
+            audioRef.current.preload = "none";
+            // Set crossOrigin to anonymous by default so visualizers can access data
+            audioRef.current.crossOrigin = "anonymous";
         }
 
         const audio = audioRef.current;
@@ -168,6 +173,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const handleCanPlay = () => {
             clearTimeouts();
             setIsConnecting(false);
+            isConnectingRef.current = false;
             hasConnectedRef.current = true;
             checkMetadata();
         };
@@ -175,6 +181,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const handlePlaying = () => {
             clearTimeouts();
             setIsConnecting(false);
+            isConnectingRef.current = false;
             hasConnectedRef.current = true;
         };
 
@@ -195,11 +202,23 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             }
         };
 
-        const handleError = (e: Event) => {
-            console.error('[AudioContext] Stream error:', e);
+        const handleError = (e: any) => {
+            const audio = audioRef.current;
+            const error = audio?.error;
+            const errorMsg = error ? `Error ${error.code}: ${error.message}` : 'Unknown stream error';
+            console.error('[AudioContext] Stream error:', e, errorMsg);
+
             if (!hasConnectedRef.current) {
                 clearTimeouts();
                 setIsConnecting(false);
+                isConnectingRef.current = false;
+
+                // Show more info in dev
+                if (window.location.hostname === 'localhost') {
+                    toast.error(`Playback failed for ${currentStationRef.current?.name}: ${errorMsg}. Check if /api/proxy is running.`);
+                } else {
+                    toast.error(`Connection failed for ${currentStationRef.current?.name}. The stream might be offline.`);
+                }
             }
         };
 
@@ -223,37 +242,43 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (!audio || hasConnectedRef.current || !isPlaying) return;
 
         setIsConnecting(true);
-        let finalUrl = streamUrl;
+        isConnectingRef.current = true;
 
-        const STAGE_PROXY = 1;
-        const STAGE_DIRECT_ANON = 2;
-        const STAGE_DIRECT_UNRESTRICTED = 3;
+        // 1. Sanitize the URL (handles Shoutcast ; and Mixed Content/Proxying)
+        // For manual stations, we force proxying to ensure CORS/Mixed Content compatibility
+        // We also check for 'local-' prefix in uuid as a fallback for manually added/imported stations
+        const isManual = currentStationRef.current?.isManual || currentStationRef.current?.stationuuid?.startsWith('local-');
+        const sanitizedUrl = sanitizeStreamUrl(streamUrl, isManual);
+        let finalUrl = sanitizedUrl;
 
-        if (stage === STAGE_PROXY) {
+        const STAGE_STANDARD = 1;
+        const STAGE_DIRECT_UNRESTRICTED = 2;
+
+        if (stage === STAGE_STANDARD) {
             audio.crossOrigin = 'anonymous';
-            finalUrl = `/api/proxy?url=${encodeURIComponent(streamUrl)}`;
-        } else if (stage === STAGE_DIRECT_ANON) {
-            audio.crossOrigin = 'anonymous';
-            finalUrl = streamUrl;
+            finalUrl = sanitizedUrl;
         } else {
+            // Last resort: If anonymous access fails, try unrestricted (might break visualizer)
+            // CRITICAL: If it's a manual station, we MUST keep it proxied or it will fail CORS/Mixed Content
+            console.warn(`[AudioContext] Attempting stage ${stage} connection (unrestricted cross-origin) for:`, sanitizedUrl);
             audio.removeAttribute('crossorigin');
             audio.crossOrigin = null;
-            finalUrl = streamUrl;
+            finalUrl = sanitizedUrl; // Keep sanitized (proxied) URL
         }
 
         clearTimeouts();
 
-        // Start Hard Timeout (7 seconds) if this is the first stage
-        if (stage === STAGE_PROXY) {
+        // Start Hard Timeout (20 seconds) if this is the first stage
+        if (stage === STAGE_STANDARD) {
             hardTimeoutRef.current = window.setTimeout(() => {
                 if (!hasConnectedRef.current && isPlaying) {
                     forceSkip('timeout');
                 }
-            }, 7000);
+            }, 20000);
         }
 
         connectionTimeoutRef.current = window.setTimeout(() => {
-            if (!hasConnectedRef.current && isConnecting) {
+            if (!hasConnectedRef.current && isConnectingRef.current) {
                 if (stage < STAGE_DIRECT_UNRESTRICTED) {
                     attemptConnection(stage + 1, streamUrl);
                 } else {
@@ -261,7 +286,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     nextStation();
                 }
             }
-        }, 3000);
+        }, 12000); // 12s per stage
 
         audio.src = finalUrl;
         audio.load();

@@ -214,8 +214,12 @@ const Radio = () => {
       let data = [...localData];
 
       // Add global stations that aren't already represented by a local curated one
+      // We check both uuid AND name to catch manual submissions that have different IDs in global registry
       globalData.forEach((gStation) => {
-        const isAlreadyLocal = localData.some(l => l.stationuuid === gStation.stationuuid);
+        const isAlreadyLocal = localData.some(l =>
+          l.stationuuid === gStation.stationuuid ||
+          l.name.toLowerCase().trim() === gStation.name.toLowerCase().trim()
+        );
         if (!isAlreadyLocal) {
           data.push(gStation);
         }
@@ -224,17 +228,43 @@ const Radio = () => {
       // Filter by region if selected
       if (region !== 'all') {
         const countries = regionToCountries[region] || [];
-        data = data.filter(station => countries.includes(station.countrycode));
+        data = data.filter(station => {
+          // Check by country code
+          if (station.countrycode && countries.includes(station.countrycode)) return true;
+
+          // Fallback: Check if country name is mentioned in our country/region map
+          // (This is a bit loose but helps local stations with only names)
+          return countries.some(code => {
+            // This is a rough check since we don't have a full name-to-code map here
+            // but we can at least check if the country name is present
+            return station.country && station.country.toLowerCase().includes(code.toLowerCase());
+          });
+        });
       }
 
       // If we had a station from URL params, inject it at the start
       if (initialStationRef.current) {
+        let stationToPlay = initialStationRef.current;
+
+        // CRITICAL: Handle data staleness. If it's a local station, 
+        // find its latest data in our fetched results.
+        if (stationToPlay.stationuuid?.startsWith('local-')) {
+          const freshLocal = localData.find(l =>
+            l.stationuuid === stationToPlay.stationuuid ||
+            l.name.toLowerCase().trim() === stationToPlay.name.toLowerCase().trim()
+          );
+          if (freshLocal) {
+            console.log(`[Radio] Refreshing stale data for: ${stationToPlay.name}`);
+            stationToPlay = freshLocal;
+          }
+        }
+
         // Remove it if it already exists in the list (avoid duplicates)
-        data = data.filter(s => s.url_resolved !== initialStationRef.current?.url_resolved);
-        data = [initialStationRef.current, ...data];
+        data = data.filter(s => s.url_resolved !== stationToPlay.url_resolved);
+        data = [stationToPlay, ...data];
 
         // Play it immediately
-        playStation(initialStationRef.current, 'home');
+        playStation(stationToPlay, 'home');
 
         // Clear the ref so we don't keep injecting it on mood changes
         initialStationRef.current = null;

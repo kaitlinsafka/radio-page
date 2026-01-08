@@ -17,19 +17,54 @@ export const getApprovedLocalStations = async (genres: string[]): Promise<RadioS
 
         if (error) throw error;
 
-        return (data || []).map(item => ({
-            stationuuid: item.stationuuid || `local-${item.id}`,
-            name: item.name,
-            url_resolved: item.url,
-            country: item.country || 'Unknown',
-            countrycode: '', // We don't necessarily have this for local manual entries
-            tags: item.genre || '',
-            favicon: '',
-            votes: 1000, // Prioritize local stations in sorting
-            clickcount: 0
-        }));
+        return (data || []).map(mapToRadioStation);
     } catch (err) {
         console.error("Error fetching local approved stations:", err);
         return [];
     }
 };
+
+export const searchLocalApprovedStations = async (query: string): Promise<RadioStation[]> => {
+    try {
+        const { data, error } = await supabase
+            .from('station_requests')
+            .select('*')
+            .eq('status', 'approved')
+            .or(`name.ilike.%${query}%,genre.ilike.%${query}%,city.ilike.%${query}%,country.ilike.%${query}%`);
+
+        if (error) throw error;
+        return (data || []).map(mapToRadioStation);
+    } catch (err) {
+        console.error("Error searching local approved stations:", err);
+        return [];
+    }
+};
+
+export const getLocalApprovedStationsByCountry = async (countryCode: string): Promise<RadioStation[]> => {
+    try {
+        const { data, error } = await supabase
+            .from('station_requests')
+            .select('*')
+            .eq('status', 'approved')
+            .ilike('country', `%${countryCode}%`); // We might need a better mapping if country names are used instead of codes
+
+        if (error) throw error;
+        return (data || []).map(mapToRadioStation);
+    } catch (err) {
+        console.error("Error fetching local stations by country:", err);
+        return [];
+    }
+};
+
+const mapToRadioStation = (item: any): RadioStation => ({
+    stationuuid: item.stationuuid || `local-${item.id}`,
+    name: item.name,
+    url_resolved: item.url,
+    country: item.country || 'Unknown',
+    countrycode: '', // We don't necessarily have this for local manual entries
+    tags: item.genre || '',
+    favicon: item.favicon || '',
+    votes: 0,
+    clickcount: 0,
+    isManual: true
+});

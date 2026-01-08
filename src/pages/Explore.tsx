@@ -15,6 +15,10 @@ import { MapboxMoonlight } from "@/components/MapboxMoonlight";
 import { FloatingPlayer } from "@/components/FloatingPlayer";
 import { Navbar } from "@/components/Navbar";
 import {
+  searchLocalApprovedStations,
+  getLocalApprovedStationsByCountry
+} from "@/services/localStationService";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -53,8 +57,26 @@ const Explore = () => {
   const handleSearch = async () => {
     if (!searchQuery.trim()) return;
     setLoading(true);
-    const results = await searchStationsByName(searchQuery);
-    setLocalStations(results);
+
+    // Fetch global and local results in parallel
+    const [globalResults, localResults] = await Promise.all([
+      searchStationsByName(searchQuery),
+      searchLocalApprovedStations(searchQuery)
+    ]);
+
+    // Merge results, prioritizing local ones
+    const combined = [...localResults];
+    globalResults.forEach(station => {
+      const isAlreadyLocal = localResults.some(l =>
+        l.stationuuid === station.stationuuid ||
+        l.name.toLowerCase().trim() === station.name.toLowerCase().trim()
+      );
+      if (!isAlreadyLocal) {
+        combined.push(station);
+      }
+    });
+
+    setLocalStations(combined);
     setHasActiveSearch(true);
     setLoading(false);
   };
@@ -74,20 +96,36 @@ const Explore = () => {
 
   const handleRegionSelect = async (countryCode: string, stateName?: string) => {
     setLoading(true);
-    let results: RadioStation[] = [];
+    let globalResults: RadioStation[] = [];
+    let localResults: RadioStation[] = [];
 
-    if (results.length > 0 || true) { // Logic preservation context
-      if (stateName) {
-        toast.info(`Exploring stations in ${stateName}...`);
-        results = await getStationsByState(stateName, countryCode);
-      } else {
-        toast.info(`Exploring stations in ${countryCode}...`);
-        results = await getStationsByCountry(countryCode);
-      }
+    if (stateName) {
+      toast.info(`Exploring stations in ${stateName}...`);
+      globalResults = await getStationsByState(stateName, countryCode);
+      // Note: We don't have local state filtering yet, so we just use country for local
+      localResults = await getLocalApprovedStationsByCountry(countryCode);
+    } else {
+      toast.info(`Exploring stations in ${countryCode}...`);
+      [globalResults, localResults] = await Promise.all([
+        getStationsByCountry(countryCode),
+        getLocalApprovedStationsByCountry(countryCode)
+      ]);
     }
 
-    if (results.length > 0) {
-      setLocalStations(results);
+    // Merge results, prioritizing local ones
+    const combined = [...localResults];
+    globalResults.forEach(station => {
+      const isAlreadyLocal = localResults.some(l =>
+        l.stationuuid === station.stationuuid ||
+        l.name.toLowerCase().trim() === station.name.toLowerCase().trim()
+      );
+      if (!isAlreadyLocal) {
+        combined.push(station);
+      }
+    });
+
+    if (combined.length > 0) {
+      setLocalStations(combined);
       setHasActiveSearch(true);
     } else {
       toast.error("No stations found in this region. Try another one!");

@@ -44,6 +44,9 @@ const Admin = () => {
         };
     }, []);
     const [history, setHistory] = useState<any[]>([]);
+    const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
+    const [editingId, setEditingId] = useState<string | null>(null);
+    const [editValue, setEditValue] = useState("");
     const [totalUsers, setTotalUsers] = useState(0);
     const [loading, setLoading] = useState(true);
 
@@ -125,9 +128,27 @@ const Admin = () => {
 
     const handleModeration = async (requestId: string, status: 'approved' | 'rejected') => {
         try {
+            const moderatedRequest = [...requests, ...history, ...searchResults].find(r => r.id === requestId);
+            if (!moderatedRequest) throw new Error("Station request not found");
+
+            let updatedUrl = moderatedRequest.url;
+            if (status === 'approved') {
+                if (moderatedRequest.url.includes('internet-radio.com/proxy/') && !moderatedRequest.url.includes('?mp=/stream')) {
+                    const cleanUrl = moderatedRequest.url.split(';')[0]; // Remove trailing ; if present
+                    updatedUrl = `${cleanUrl}${cleanUrl.includes('?') ? '&' : '?'}mp=/stream`;
+                    console.log('Auto-corrected internet-radio proxy URL:', updatedUrl);
+                }
+                // Clean up semicolon if exists, if it wasn't already handled by the above logic
+                updatedUrl = updatedUrl.replace(/;$/, '');
+            }
+
             const { error } = await supabase
                 .from('station_requests')
-                .update({ status, updated_at: new Date().toISOString() })
+                .update({
+                    status,
+                    url: updatedUrl,
+                    updated_at: new Date().toISOString()
+                })
                 .eq('id', requestId);
 
             if (error) throw error;
@@ -135,18 +156,44 @@ const Admin = () => {
             toast.success(`Station ${status}!`);
 
             // Move between local states
-            const moderatedRequest = [...requests, ...history, ...searchResults].find(r => r.id === requestId);
-            if (moderatedRequest) {
-                const updatedItem = { ...moderatedRequest, status, updated_at: new Date().toISOString() };
+            const updatedItem = {
+                ...moderatedRequest,
+                status,
+                url: updatedUrl,
+                updated_at: new Date().toISOString()
+            };
 
-                setRequests(prev => prev.filter(r => r.id !== requestId));
-                setHistory(prev => [updatedItem, ...prev.filter(r => r.id !== requestId)]);
-                if (isSearching) {
-                    setSearchResults(prev => prev.map(r => r.id === requestId ? updatedItem : r));
-                }
+            setRequests(prev => prev.filter(r => r.id !== requestId));
+            setHistory(prev => [updatedItem, ...prev.filter(r => r.id !== requestId)]);
+            if (isSearching) {
+                setSearchResults(prev => prev.map(r => r.id === requestId ? updatedItem : r));
             }
         } catch (err) {
             toast.error("Action failed");
+        }
+    };
+
+    const handleSaveUrl = async (requestId: string, list: 'requests' | 'history' | 'search') => {
+        try {
+            const { error } = await supabase
+                .from('station_requests')
+                .update({ url: editValue, updated_at: new Date().toISOString() })
+                .eq('id', requestId);
+
+            if (error) throw error;
+
+            const updateState = (prev: any[]) => prev.map(item =>
+                item.id === requestId ? { ...item, url: editValue, updated_at: new Date().toISOString() } : item
+            );
+
+            if (list === 'requests') setRequests(updateState);
+            else if (list === 'history') setHistory(updateState);
+            else if (list === 'search') setSearchResults(updateState);
+
+            setEditingId(null);
+            toast.success("URL updated successfully");
+        } catch (err) {
+            toast.error("Failed to update URL");
         }
     };
 
@@ -310,11 +357,20 @@ const Admin = () => {
                 Array.from(new Set(station.tags.split(/,\s*/).map(t => t.trim()).filter(Boolean))).join(", ")
                 : "";
 
+            let url = station.url_resolved;
+            if (url.includes('internet-radio.com/proxy')) {
+                if (!url.includes('?mp=/stream') && !url.includes('&mp=/stream')) {
+                    const separator = url.includes('?') ? '&' : '?';
+                    url = url + separator + 'mp=/stream';
+                }
+                url = url.replace(/;$/, '');
+            }
+
             const { data, error } = await supabase
                 .from('station_requests')
                 .insert([{
                     name: station.name,
-                    url: station.url_resolved,
+                    url: url,
                     genre: cleanTags,
                     city: "",
                     country: station.country,
@@ -831,9 +887,30 @@ const Admin = () => {
                                                                     Requested by: {req.profiles.name}
                                                                 </p>
                                                             )}
-                                                            <code className="bg-[#F9F9FB] p-2 rounded text-[10px] break-all border border-[#331F21]/10 block w-fit max-w-full">
-                                                                {req.url}
-                                                            </code>
+                                                            {editingId === req.id ? (
+                                                                <div className="flex gap-2 mt-2">
+                                                                    <Input
+                                                                        value={editValue}
+                                                                        onChange={(e) => setEditValue(e.target.value)}
+                                                                        className="h-8 text-[10px] border-2 border-[#331F21]"
+                                                                    />
+                                                                    <Button size="sm" onClick={() => handleSaveUrl(req.id, 'requests')} className="h-8 bg-[#331F21] text-white">Save</Button>
+                                                                    <Button size="sm" variant="ghost" onClick={() => setEditingId(null)} className="h-8 border-2 border-[#331F21]">Cancel</Button>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="group relative mt-2">
+                                                                    <code className="bg-[#F9F9FB] p-2 rounded text-[10px] break-all border border-[#331F21]/10 block w-fit max-w-full">
+                                                                        {req.url}
+                                                                    </code>
+                                                                    <button
+                                                                        onClick={() => { setEditingId(req.id); setEditValue(req.url); }}
+                                                                        className="absolute -right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 bg-white border border-[#331F21] rounded p-1 hover:bg-[#D3E1E6] transition-all"
+                                                                        title="Edit URL"
+                                                                    >
+                                                                        <Zap className="w-3 h-3" />
+                                                                    </button>
+                                                                </div>
+                                                            )}
                                                         </div>
                                                         <div className="flex gap-2 ml-6">
                                                             <Button
@@ -891,16 +968,25 @@ const Admin = () => {
                                     ) : (
                                         <div className="space-y-3">
                                             {history.map(item => (
-                                                <div key={item.id} className="bg-white border-2 border-[#331F21]/10 p-4 rounded-xl shadow-sm space-y-4">
+                                                <div
+                                                    key={item.id}
+                                                    className={cn(
+                                                        "bg-white border-2 rounded-xl shadow-sm space-y-4 transition-all duration-200 cursor-pointer overflow-hidden",
+                                                        expandedHistoryId === item.id
+                                                            ? "border-[#331F21] p-5 shadow-md"
+                                                            : "border-[#331F21]/10 p-4 hover:border-[#331F21]/30"
+                                                    )}
+                                                    onClick={() => setExpandedHistoryId(expandedHistoryId === item.id ? null : item.id)}
+                                                >
                                                     <div className="flex justify-between items-start">
-                                                        <div>
+                                                        <div className="flex-1 min-w-0">
                                                             <div className="flex items-center gap-2 mb-1">
-                                                                <h4 className="font-bold text-[#331F21] text-sm uppercase truncate max-w-[150px]">{item.name}</h4>
+                                                                <h4 className="font-bold text-[#331F21] text-sm uppercase truncate">{item.name}</h4>
                                                                 {item.is_user_submission === false && (
-                                                                    <span className="text-[7px] font-black uppercase bg-[#331F21] text-white px-1.5 py-0.5 rounded">Curated</span>
+                                                                    <span className="text-[7px] font-black uppercase bg-[#331F21] text-white px-1.5 py-0.5 rounded shrink-0">Curated</span>
                                                                 )}
                                                             </div>
-                                                            <p className="text-[10px] font-bold text-[#331F21]/40 uppercase">
+                                                            <p className="text-[10px] font-bold text-[#331F21]/40 uppercase truncate">
                                                                 {item.city}, {item.country}
                                                             </p>
                                                             {item.profiles?.name && (
@@ -909,37 +995,84 @@ const Admin = () => {
                                                                 </p>
                                                             )}
                                                         </div>
-                                                        <div className="flex flex-col items-end gap-2">
+                                                        <div className="flex flex-col items-end gap-2 ml-4">
                                                             <span className={cn(
                                                                 "text-[10px] font-black uppercase px-2 py-0.5 rounded",
                                                                 item.status === 'approved' ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"
                                                             )}>
                                                                 {item.status}
                                                             </span>
-                                                            <div className="flex gap-1">
-                                                                <Button
-                                                                    size="icon"
-                                                                    variant="ghost"
-                                                                    className="w-6 h-6 hover:bg-[#D3E1E6]"
-                                                                    onClick={() => handleResetToPending(item.id)}
-                                                                    title="Return to Queue"
-                                                                >
-                                                                    <RotateCcw className="w-3 h-3" />
-                                                                </Button>
-                                                                <Button
-                                                                    size="icon"
-                                                                    variant="ghost"
-                                                                    className="w-6 h-6 hover:bg-red-50 text-red-400 hover:text-red-600"
-                                                                    onClick={() => handleDelete(item.id, 'history')}
-                                                                    title="Delete Permanently"
-                                                                >
-                                                                    <Trash2 className="w-3 h-3" />
-                                                                </Button>
-                                                            </div>
                                                         </div>
                                                     </div>
 
-                                                    <div className="pt-2 border-t border-dashed border-[#331F21]/10">
+                                                    {expandedHistoryId === item.id && (
+                                                        <div className="pt-2 space-y-3 animate-in fade-in slide-in-from-top-1 duration-200" onClick={(e) => e.stopPropagation()}>
+                                                            <div className="space-y-1">
+                                                                <div className="flex justify-between items-center">
+                                                                    <p className="text-[8px] font-black uppercase text-[#331F21]/40">Stream URL</p>
+                                                                    <button
+                                                                        onClick={(e) => { e.stopPropagation(); setEditingId(item.id); setEditValue(item.url); }}
+                                                                        className="text-[8px] font-black uppercase text-[#331F21]/60 hover:text-[#331F21] underline"
+                                                                    >
+                                                                        Edit
+                                                                    </button>
+                                                                </div>
+                                                                {editingId === item.id ? (
+                                                                    <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
+                                                                        <Input
+                                                                            value={editValue}
+                                                                            onChange={(e) => setEditValue(e.target.value)}
+                                                                            className="h-7 text-[9px] border-2 border-[#331F21]"
+                                                                        />
+                                                                        <Button size="sm" onClick={() => handleSaveUrl(item.id, 'history')} className="h-7 px-2 bg-[#331F21] text-white text-[9px]">Save</Button>
+                                                                        <Button size="sm" variant="ghost" onClick={() => setEditingId(null)} className="h-7 px-2 border-2 border-[#331F21] text-[9px]">X</Button>
+                                                                    </div>
+                                                                ) : (
+                                                                    <code className="bg-[#F9F9FB] p-2 rounded text-[9px] break-all border border-[#331F21]/10 block w-full leading-relaxed">
+                                                                        {item.url}
+                                                                    </code>
+                                                                )}
+                                                            </div>
+
+                                                            <div className="flex items-center justify-between py-1">
+                                                                <div className="space-y-0.5">
+                                                                    <p className="text-[8px] font-black uppercase text-[#331F21]/40">Last Updated</p>
+                                                                    <p className="text-[9px] font-bold text-[#331F21]/60">
+                                                                        {new Date(item.updated_at).toLocaleString()}
+                                                                    </p>
+                                                                </div>
+
+                                                                <div className="flex gap-1.5">
+                                                                    <Button
+                                                                        size="icon"
+                                                                        variant="ghost"
+                                                                        className="w-8 h-8 rounded-lg border border-[#331F21]/10 hover:bg-[#D3E1E6] hover:border-[#331F21]/30 transition-colors"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            handleResetToPending(item.id);
+                                                                        }}
+                                                                        title="Return to Queue"
+                                                                    >
+                                                                        <RotateCcw className="w-3.5 h-3.5" />
+                                                                    </Button>
+                                                                    <Button
+                                                                        size="icon"
+                                                                        variant="ghost"
+                                                                        className="w-8 h-8 rounded-lg border border-red-100 bg-red-50/30 text-red-400 hover:text-red-600 hover:bg-red-50 hover:border-red-200 transition-colors"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            handleDelete(item.id, 'history');
+                                                                        }}
+                                                                        title="Delete Permanently"
+                                                                    >
+                                                                        <Trash2 className="w-3.5 h-3.5" />
+                                                                    </Button>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    <div className="pt-2 border-t border-dashed border-[#331F21]/10" onClick={(e) => e.stopPropagation()}>
                                                         <AdminTagPicker
                                                             selectedTags={item.genre ? item.genre.split(/,\s*/).filter(Boolean) : []}
                                                             onTagsChange={(newTags) => handleUpdateTags(item.id, newTags, 'history')}
