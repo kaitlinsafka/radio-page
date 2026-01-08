@@ -58,9 +58,7 @@ const Auth = () => {
                 toast.success("Password updated successfully!");
                 navigate("/radio");
             } else if (view === 'reset') {
-                const { error } = await supabase.auth.resetPasswordForEmail(email, {
-                    redirectTo: `${window.location.origin}/auth?view=update_password`,
-                });
+                const { error } = await supabase.auth.resetPasswordForEmail(email);
                 if (error) throw error;
                 toast.success("Password reset link sent to your email!");
                 setView('login');
