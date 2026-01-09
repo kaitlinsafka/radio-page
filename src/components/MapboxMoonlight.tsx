@@ -5,7 +5,9 @@ import { RadioStation } from '@/services/radioBrowserApi';
 import { geocodeStation } from '@/services/geocoding';
 
 // Use dynamic token from environment variables or fallback to public token
-mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN || 'pk.eyJ1IjoibWFwYm94IiwiYSI6ImNpejY4M29iazA2Z2gycXA4N2pmbDg5Z3IifQ.nSBy9y7pcn9bHjQJ9PToBg';
+const rawToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
+const cleanToken = rawToken?.trim();
+mapboxgl.accessToken = cleanToken || 'pk.eyJ1IjoibWFwYm94IiwiYSI6ImNpejY4M29iazA2Z2gycXA4N2pmbDg5Z3IifQ.nSBy9y7pcn9bHjQJ9PToBg';
 
 interface MapboxMoonlightProps {
     stations: RadioStation[];
@@ -35,13 +37,40 @@ export const MapboxMoonlight: React.FC<MapboxMoonlightProps> = ({
     useEffect(() => {
         if (!mapContainerRef.current) return;
 
+        // Determine style: Use custom kaitlin-safka style ONLY if a personal token is provided.
+        // The default Mapbox public token cannot access private styles.
+        // We use a more explicit check for the token to avoid loading black tiles if the style is inaccessible.
+        const token = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN?.trim();
+        const customStyle = 'mapbox://styles/kaitlin-safka/cmjd4dcgd004101s83ta4ghmo';
+        const defaultStyle = isDarkMode ? 'mapbox://styles/mapbox/dark-v11' : 'mapbox://styles/mapbox/light-v11';
+
+        // If we have a token, we TRY the custom style, but we'll monitor for errors.
+        const mapStyle = token ? customStyle : defaultStyle;
+
         const map = new mapboxgl.Map({
             container: mapContainerRef.current,
-            style: 'mapbox://styles/kaitlin-safka/cmjd4dcgd004101s83ta4ghmo',
+            style: mapStyle,
             center: [0, 20],
             zoom: 1.5,
-            projection: 'globe' as any,
             attributionControl: false
+        });
+
+        // Add error handling to catch style loading issues
+        map.on('error', (e) => {
+            console.error('Mapbox error:', e);
+            const err = e.error as any;
+            if (err?.message?.includes('style') || err?.status === 401 || err?.status === 403) {
+                console.warn('Mapbox style failed to load, falling back to default...');
+                map.setStyle(defaultStyle);
+            }
+        });
+
+        map.on('load', () => {
+            console.log('Map loaded successfully');
+        });
+
+        map.on('styledata', () => {
+            console.log('Map style data loaded');
         });
 
         map.addControl(new mapboxgl.NavigationControl(), 'top-right');
@@ -115,9 +144,11 @@ export const MapboxMoonlight: React.FC<MapboxMoonlightProps> = ({
 
         map.on('zoomend', () => {
             const z = map.getZoom();
-            // User requested: "If zoom < 4, pins disappear and search reset"
-            if (z < 3.5) {
-                onReset(); // Clear parent state
+            // Only trigger onReset (which clears parental search state) 
+            // if we are zoomed out AND there are no active station pins.
+            // If the user has a specific search active, keep the pins!
+            if (z < 3.5 && stations.length === 0) {
+                onReset(); // Clear parent state only if truly resetting
                 if (view === 'us') handleReset(map); // Reset map layers
             }
         });
@@ -332,7 +363,7 @@ export const MapboxMoonlight: React.FC<MapboxMoonlightProps> = ({
 
     return (
         <div className="relative w-full h-[600px] rounded-2xl overflow-hidden border-2 border-[#331F21] dark:border-white/10 shadow-2xl">
-            <div ref={mapContainerRef} className="w-full h-full bg-black" />
+            <div ref={mapContainerRef} className="w-full h-full bg-neutral-800" />
             <div className="absolute top-4 left-4 bg-black/80 backdrop-blur px-4 py-2 rounded-full text-[10px] font-bold text-white tracking-widest uppercase">
                 {view === 'us' ? 'US VIEW (Zoom Out to Reset)' : 'WORLD VIEW'}
             </div>
