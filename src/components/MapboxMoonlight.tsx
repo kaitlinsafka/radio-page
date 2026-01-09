@@ -32,6 +32,8 @@ export const MapboxMoonlight: React.FC<MapboxMoonlightProps> = ({
     const markersRef = useRef<mapboxgl.Marker[]>([]);
     const activePopupRef = useRef<mapboxgl.Popup | null>(null);
     const [view, setView] = useState<'world' | 'us'>('world');
+    const [mapError, setMapError] = useState<string | null>(null);
+    const [tokenDetected, setTokenDetected] = useState<boolean>(false);
 
     // Initialize Map
     useEffect(() => {
@@ -41,6 +43,8 @@ export const MapboxMoonlight: React.FC<MapboxMoonlightProps> = ({
         // The default Mapbox public token cannot access private styles.
         // We use a more explicit check for the token to avoid loading black tiles if the style is inaccessible.
         const token = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN?.trim();
+        setTokenDetected(!!token);
+
         const customStyle = 'mapbox://styles/kaitlin-safka/cmjd4dcgd004101s83ta4ghmo';
         const defaultStyle = isDarkMode ? 'mapbox://styles/mapbox/dark-v11' : 'mapbox://styles/mapbox/light-v11';
 
@@ -59,6 +63,8 @@ export const MapboxMoonlight: React.FC<MapboxMoonlightProps> = ({
         map.on('error', (e) => {
             console.error('Mapbox error:', e);
             const err = e.error as any;
+            setMapError(err?.message || 'Unknown Mapbox Error');
+
             if (err?.message?.includes('style') || err?.status === 401 || err?.status === 403) {
                 console.warn('Mapbox style failed to load, falling back to default...');
                 map.setStyle(defaultStyle);
@@ -67,6 +73,7 @@ export const MapboxMoonlight: React.FC<MapboxMoonlightProps> = ({
 
         map.on('load', () => {
             console.log('Map loaded successfully');
+            setMapError(null);
         });
 
         map.on('styledata', () => {
@@ -363,9 +370,23 @@ export const MapboxMoonlight: React.FC<MapboxMoonlightProps> = ({
 
     return (
         <div className="relative w-full h-[600px] rounded-2xl overflow-hidden border-2 border-[#331F21] dark:border-white/10 shadow-2xl">
-            <div ref={mapContainerRef} className="w-full h-full bg-neutral-800" />
-            <div className="absolute top-4 left-4 bg-black/80 backdrop-blur px-4 py-2 rounded-full text-[10px] font-bold text-white tracking-widest uppercase">
-                {view === 'us' ? 'US VIEW (Zoom Out to Reset)' : 'WORLD VIEW'}
+            <div ref={mapContainerRef} className="w-full h-full bg-neutral-900" />
+
+            {/* Status Overlays */}
+            <div className="absolute top-4 left-4 flex flex-col gap-2 pointer-events-none">
+                <div className="bg-black/80 backdrop-blur px-4 py-2 rounded-full text-[10px] font-bold text-white tracking-widest uppercase">
+                    {view === 'us' ? 'US VIEW (Zoom Out to Reset)' : 'WORLD VIEW'}
+                </div>
+
+                <div className={`px-4 py-1.5 rounded-full text-[9px] font-bold tracking-widest uppercase backdrop-blur ${tokenDetected ? 'bg-green-500/80 text-white' : 'bg-amber-500/80 text-black'}`}>
+                    TOKEN: {tokenDetected ? 'DETECTED' : 'NOT DETECTED'}
+                </div>
+
+                {mapError && (
+                    <div className="bg-red-500/90 text-white px-4 py-2 rounded-lg text-[10px] font-bold max-w-[250px] whitespace-pre-wrap pointer-events-auto">
+                        ERROR: {mapError}
+                    </div>
+                )}
             </div>
         </div>
     );
